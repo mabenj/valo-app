@@ -6,12 +6,4 @@ services:
         environment:
             - VALO_APP_GATEWAY_ADDRESS=<ip address>
             - VALO_APP_GATEWAY_SECURITY_CODE=<security code>
-        ports:
-            - 9000:9000
-        networks:
-            - valo-net
-
-networks:
-    valo-net:
-        name: host
-        external: true
+        network_mode: host
