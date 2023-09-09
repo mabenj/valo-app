@@ -36,19 +36,21 @@ export default class GatewayClient {
     }
 
     public async operateGroup(group: Group, operation: GroupOperation) {
-        await this.tradfri.operateGroup(group, operation, true);
+        try {
+            await this.tradfri.operateGroup(group, operation, true);
+        } catch (error) {
+            await GatewayClient.dispose();
+            throw error;
+        }
     }
 
     public async operateLight(accessory: Accessory, operation: LightOperation) {
-        await this.tradfri.operateLight(accessory, operation, true);
-    }
-
-    public static async dispose() {
-        while (GatewayClient.instance?.initializing) {
-            await sleep(100);
+        try {
+            await this.tradfri.operateLight(accessory, operation, true);
+        } catch (error) {
+            await GatewayClient.dispose();
+            throw error;
         }
-        GatewayClient.instance?.tradfri.destroy();
-        GatewayClient.instance = null;
     }
 
     public static async getInstance() {
@@ -56,10 +58,11 @@ export default class GatewayClient {
             await sleep(100);
         }
         if (!GatewayClient.instance) {
+            GatewayClient.logger.debug("Initializing client instance...");
             GatewayClient.instance = new GatewayClient();
             await this.init();
         } else {
-            console.log("instance already initialized");
+            GatewayClient.logger.debug("Reusing client instance");
         }
         return GatewayClient.instance;
     }
@@ -89,26 +92,39 @@ export default class GatewayClient {
             throw new ValoError("Unable to connect to Tradfri gateway");
         }
     }
+
+    private static async dispose() {
+        while (GatewayClient.instance?.initializing) {
+            await sleep(100);
+        }
+        GatewayClient.instance?.tradfri.destroy();
+        GatewayClient.instance = null;
+    }
 }
 
 async function getGroupsAndAccessories(tradfri: TradfriClient) {
     try {
         const groupsPromise = new Promise<Group[]>(async (resolve, reject) => {
-            const groupList: Group[] = [];
-            tradfri.on("group updated", (group) => groupList.push(group));
+            const groupsById: Record<string, Group> = {};
+            tradfri.on(
+                "group updated",
+                (group) => (groupsById[group.instanceId] = group)
+            );
             tradfri.on("error", reject);
             await tradfri.observeGroupsAndScenes();
-            resolve(groupList);
+            resolve(Object.values(groupsById));
         });
         const accessoriesPromise = new Promise<Accessory[]>(
             async (resolve, reject) => {
-                const accessoryList: Accessory[] = [];
-                tradfri.on("device updated", (device) =>
-                    accessoryList.push(device)
+                const accessoriesById: Record<string, Accessory> = {};
+                tradfri.on(
+                    "device updated",
+                    (accessory) =>
+                        (accessoriesById[accessory.instanceId] = accessory)
                 );
                 tradfri.on("error", reject);
                 await tradfri.observeDevices();
-                resolve(accessoryList);
+                resolve(Object.values(accessoriesById));
             }
         );
         const [groups, accessories] = await Promise.all([
