@@ -1,8 +1,11 @@
 import { ApiRequest, ApiResponse, ApiRoute } from "@/lib/api-route";
 import { LightService } from "@/lib/services/light.service";
-import { Rgba, RgbaValidator } from "@/lib/validators/rgba.validator";
+import {
+    LightState,
+    LightStateValidator
+} from "@/lib/validators/light-state.validator";
 
-async function operateGroup(req: ApiRequest<Rgba>, res: ApiResponse) {
+async function operateGroup(req: ApiRequest<LightState>, res: ApiResponse) {
     const { groupId } = req.query as { groupId: string };
     const service = new LightService();
     await service.operateGroup(+groupId, req.body);
@@ -12,6 +15,6 @@ async function operateGroup(req: ApiRequest<Rgba>, res: ApiResponse) {
 export default ApiRoute.create({
     post: {
         handler: operateGroup,
-        validator: RgbaValidator
+        validator: LightStateValidator
     }
 });

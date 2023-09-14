@@ -3,12 +3,18 @@ import { NotFoundError } from "../errors";
 import GatewayClient from "../gateway-client";
 import { GroupDto } from "../types/group-dto";
 import { caseInsensitiveSorter } from "../utilities";
-import { Rgba } from "../validators/rgba.validator";
+import { LightState } from "../validators/light-state.validator";
 
-const TURNED_OFF_COLOR = { red: 0, green: 0, blue: 0, alpha: 1 };
+const EMPTY_LIGHT_STATE: LightState = {
+    red: 0,
+    green: 0,
+    blue: 0,
+    alpha: 1,
+    isOn: true
+};
 
 export class LightService {
-    async operateAll(isOn: boolean): Promise<GroupDto[]> {
+    async switchAll(on: boolean) {
         const client = await GatewayClient.getInstance();
         const superGroup = client.groups.find(
             (group) => group.name === "SuperGroup"
@@ -16,22 +22,10 @@ export class LightService {
         if (!superGroup) {
             throw new NotFoundError(`Could not find super group`);
         }
-        await client.operateGroup(superGroup, { onOff: isOn });
-        const groups = await this.getGroupDtos(client);
-        if (isOn) {
-            return groups;
-        }
-        return groups.map((group) => ({
-            ...group,
-            rgba: TURNED_OFF_COLOR,
-            bulbs: group.bulbs.map((bulb) => ({
-                ...bulb,
-                rgba: TURNED_OFF_COLOR
-            }))
-        }));
+        await client.operateGroup(superGroup, { onOff: on });
     }
 
-    async operateGroup(groupId: number, rgba: Rgba) {
+    async operateGroup(groupId: number, state: LightState) {
         const client = await GatewayClient.getInstance();
         const group = client.groups.find(
             (group) => group.instanceId === groupId
@@ -43,7 +37,7 @@ export class LightService {
             group.deviceIDs.includes(accessory.instanceId)
         );
 
-        const operation = rgbaToLightOperation(rgba);
+        const operation = getLightOperation(state);
         await Promise.all(
             accessories.map((accessory) =>
                 client.operateLight(accessory, operation)
@@ -51,7 +45,7 @@ export class LightService {
         );
     }
 
-    async operateBulb(bulbId: number, rgba: Rgba) {
+    async operateBulb(bulbId: number, state: LightState) {
         const client = await GatewayClient.getInstance();
         const accessory = client.accessories.find(
             (accessory) => accessory.instanceId === bulbId
@@ -59,7 +53,7 @@ export class LightService {
         if (!accessory) {
             throw new NotFoundError(`Bulb with ID '${bulbId}' not found`);
         }
-        await client.operateLight(accessory, rgbaToLightOperation(rgba));
+        await client.operateLight(accessory, getLightOperation(state));
     }
 
     async getGroups(): Promise<GroupDto[]> {
@@ -67,7 +61,7 @@ export class LightService {
         return this.getGroupDtos(client);
     }
 
-    private async getGroupDtos(client: GatewayClient) {
+    private getGroupDtos(client: GatewayClient): GroupDto[] {
         return client.groups
             .filter((group) => group.name !== "SuperGroup")
             .map((group) => {
@@ -81,54 +75,55 @@ export class LightService {
                             isOnline: accessory.alive,
                             lastSeenUnixTimestamp: accessory.lastSeen,
                             name: accessory.name,
-                            isOn: light.onOff,
-                            rgba: light.onOff
-                                ? getRgba(light.color, light.dimmer)
-                                : TURNED_OFF_COLOR
+                            lightState: getLightState(
+                                light.color,
+                                light.dimmer,
+                                light.onOff
+                            )
                         }))
                     )
                     .sort(caseInsensitiveSorter("name"));
                 return {
                     name: group.name,
                     id: group.instanceId,
-                    rgba:
-                        group.onOff && bulbs[0]
-                            ? bulbs[0].rgba
-                            : TURNED_OFF_COLOR,
-                    bulbs: bulbs
+                    bulbs: bulbs,
+                    lightState: bulbs[0]
+                        ? bulbs[0].lightState
+                        : EMPTY_LIGHT_STATE
                 };
             })
             .sort(caseInsensitiveSorter("name"));
     }
 }
 
-function rgbaToLightOperation({
+function getLightOperation({
     red,
     green,
     blue,
-    alpha
-}: Rgba): LightOperation {
+    alpha,
+    isOn
+}: LightState): LightOperation {
     const operation: LightOperation = {
         transitionTime: 0
     };
-    if ((red === 0 && green === 0 && blue === 0) || alpha === 0) {
-        operation.onOff = false;
-        return operation;
-    }
-    operation.onOff = true;
+    operation.onOff = isOn;
     operation.color = rgbToHex(red, green, blue);
     operation.dimmer = alpha * 100;
     return operation;
 }
 
 function rgbToHex(red: number, green: number, blue: number) {
-    const redHex = red.toString(16);
-    const greenHex = green.toString(16);
-    const blueHex = blue.toString(16);
+    const redHex = red.toString(16).padStart(2, "0");
+    const greenHex = green.toString(16).padStart(2, "0");
+    const blueHex = blue.toString(16).padStart(2, "0");
     return redHex + greenHex + blueHex;
 }
 
-function getRgba(hex: string, brightness: number) {
+function getLightState(
+    hex: string,
+    brightness: number,
+    isOn: boolean
+): LightState {
     const red = parseInt(hex.substring(0, 2), 16);
     const green = parseInt(hex.substring(2, 4), 16);
     const blue = parseInt(hex.substring(4, 6), 16);
@@ -137,6 +132,7 @@ function getRgba(hex: string, brightness: number) {
         red,
         green,
         blue,
-        alpha
+        alpha,
+        isOn
     };
 }

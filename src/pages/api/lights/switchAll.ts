@@ -3,18 +3,18 @@ import { LightService } from "@/lib/services/light.service";
 import { GroupDto } from "@/lib/types/group-dto";
 import { z } from "zod";
 
-async function operateAll(
+async function switchAll(
     req: ApiRequest<{ isOn: boolean }>,
-    res: ApiResponse<{groups: GroupDto[]}>
+    res: ApiResponse
 ) {
     const service = new LightService();
-    const groups = await service.operateAll(req.body.isOn);
-    res.status(200).json({ status: "ok", groups });
+    await service.switchAll(req.body.isOn);
+    res.status(200).json({ status: "ok" });
 }
 
 export default ApiRoute.create({
     post: {
-        handler: operateAll,
+        handler: switchAll,
         validator: z.object({
             isOn: z.boolean()
         })
