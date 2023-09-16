@@ -2,8 +2,8 @@ import { LightState } from "../validators/light-state.validator";
 
 export interface BulbDto {
     name: string;
-    accessoryId: number;
+    id: number;
     isOnline: boolean;
     lastSeenUnixTimestamp: number;
-    lightState: LightState
+    lightState: LightState;
 }

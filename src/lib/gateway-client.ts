@@ -1,14 +1,34 @@
 import {
     Accessory,
     Group,
-    GroupOperation,
+    Light,
     LightOperation,
     TradfriClient
 } from "node-tradfri-client";
 import Config from "./config";
-import { ValoError } from "./errors";
+import { NotFoundError, ValoError } from "./errors";
 import Logger, { LogColor } from "./logger";
-import { getErrorMessage, sleep } from "./utilities";
+import { BulbDto } from "./types/bulb-dto";
+import { GroupDto } from "./types/group-dto";
+import {
+    caseInsensitiveSorter,
+    getErrorMessage,
+    rgbToHex,
+    sleep,
+    stringEqualsCi
+} from "./utilities";
+import { LightState } from "./validators/light-state.validator";
+
+interface BulbGroup {
+    name: string;
+    gatewayInstance: Group;
+}
+
+interface Bulb {
+    name: string;
+    lightState: LightState;
+    gatewayInstance: Accessory;
+}
 
 export default class GatewayClient {
     private static instance: GatewayClient | null = null;
@@ -19,34 +39,153 @@ export default class GatewayClient {
 
     private tradfri: TradfriClient;
     private initializing = false;
-
-    private _groups: Group[] = [];
-    private _accessories: Accessory[] = [];
+    private groupsById: Record<number, BulbGroup> = {};
+    private bulbsById: Record<number, Bulb> = {};
 
     private constructor() {
         this.tradfri = new TradfriClient(Config.gatewayAddress);
     }
 
-    public get groups() {
-        return this._groups;
+    public get groups(): GroupDto[] {
+        return Object.values(this.groupsById)
+            .filter((group) => group.name !== "SuperGroup")
+            .map((group) => this.groupToDto(group));
     }
 
-    public get accessories() {
-        return this._accessories;
-    }
+    public async renameGroup(groupId: number, name: string): Promise<GroupDto> {
+        const group = this.groupsById[groupId];
+        if (!group) {
+            throw new NotFoundError(`Group '${groupId}' not found`);
+        }
+        if (group.name === name) {
+            return this.groupToDto(group);
+        }
+        if (
+            Object.values(this.groupsById).some((group) =>
+                stringEqualsCi(group.name, name)
+            )
+        ) {
+            throw new ValoError(`Name already in use '${name}'`);
+        }
 
-    public async operateGroup(group: Group, operation: GroupOperation) {
         try {
-            await this.tradfri.operateGroup(group, operation, true);
+            group.name = name;
+            group.gatewayInstance.name = name;
+            await this.tradfri.updateGroup(group.gatewayInstance);
+            this.groupsById[groupId] = group;
+            return this.groupToDto(group);
         } catch (error) {
             await GatewayClient.dispose();
             throw error;
         }
     }
 
-    public async operateLight(accessory: Accessory, operation: LightOperation) {
+    public async renameBulb(bulbId: number, name: string): Promise<BulbDto> {
+        const bulb = this.bulbsById[bulbId];
+        if (!bulb) {
+            throw new NotFoundError(`Bulb '${bulbId}' not found`);
+        }
+        if (bulb.name === name) {
+            return this.bulbToDto(bulb);
+        }
+        if (
+            Object.values(this.bulbsById).some((bulb) =>
+                stringEqualsCi(bulb.name, name)
+            )
+        ) {
+            throw new ValoError(`Name already in use '${name}'`);
+        }
+
         try {
-            await this.tradfri.operateLight(accessory, operation, true);
+            bulb.name = name;
+            bulb.gatewayInstance.name = name;
+            await this.tradfri.updateDevice(bulb.gatewayInstance);
+            this.bulbsById[bulbId] = bulb;
+            return this.bulbToDto(bulb);
+        } catch (error) {
+            await GatewayClient.dispose();
+            throw error;
+        }
+    }
+
+    public async switchAll(onOff: boolean) {
+        const superGroup = Object.values(this.groupsById).find(
+            (group) => group.name === "SuperGroup"
+        );
+        if (!superGroup) {
+            throw new NotFoundError("Super group not found");
+        }
+
+        try {
+            await this.tradfri.operateGroup(
+                superGroup.gatewayInstance,
+                { onOff },
+                true
+            );
+            Object.keys(this.bulbsById).forEach((bulbId) => {
+                this.bulbsById[+bulbId].lightState.isOn = onOff;
+            });
+        } catch (error) {
+            await GatewayClient.dispose();
+            throw error;
+        }
+    }
+
+    public async changeGroupLights(
+        groupId: number,
+        lightState: LightState
+    ): Promise<GroupDto> {
+        const group = this.groupsById[groupId];
+        if (!group) {
+            throw new NotFoundError(`Group '${groupId}' not found`);
+        }
+
+        try {
+            const bulbs = group.gatewayInstance.deviceIDs
+                .map((deviceId) => this.bulbsById[deviceId])
+                .filter((bulb) => !!bulb);
+            const operation = generateLightOperation(lightState);
+            await Promise.all(
+                bulbs.map((bulb) =>
+                    this.tradfri.operateLight(
+                        bulb.gatewayInstance,
+                        operation,
+                        true
+                    )
+                )
+            );
+
+            bulbs.forEach((bulb) => {
+                bulb.lightState = lightState;
+                this.bulbsById[bulb.gatewayInstance.instanceId] = bulb;
+            });
+
+            return this.groupToDto(group);
+        } catch (error) {
+            await GatewayClient.dispose();
+            throw error;
+        }
+    }
+
+    public async changeBulbLights(
+        bulbId: number,
+        lightState: LightState
+    ): Promise<BulbDto> {
+        const bulb = this.bulbsById[bulbId];
+        if (!bulb) {
+            throw new NotFoundError(`Bulb '${bulbId}' not found`);
+        }
+
+        try {
+            const operation = generateLightOperation(lightState);
+            await this.tradfri.operateLight(
+                bulb.gatewayInstance,
+                operation,
+                true
+            );
+            bulb.lightState = lightState;
+            this.bulbsById[bulbId] = bulb;
+            return this.bulbToDto(bulb);
         } catch (error) {
             await GatewayClient.dispose();
             throw error;
@@ -75,11 +214,11 @@ export default class GatewayClient {
                     Config.gatewaySecurityCode
                 );
             await GatewayClient.instance!.tradfri.connect(identity, psk);
-            const { groups, accessories } = await getGroupsAndAccessories(
+            const { groups, bulbs } = await getGroupsAndBulbs(
                 GatewayClient.instance!.tradfri
             );
-            GatewayClient.instance!._groups = groups;
-            GatewayClient.instance!._accessories = accessories;
+            GatewayClient.instance!.groupsById = groups;
+            GatewayClient.instance!.bulbsById = bulbs;
             GatewayClient.instance!.initializing = false;
         } catch (error) {
             GatewayClient.logger.error(
@@ -100,12 +239,45 @@ export default class GatewayClient {
         GatewayClient.instance?.tradfri.destroy();
         GatewayClient.instance = null;
     }
+
+    private groupToDto(group: BulbGroup): GroupDto {
+        const EMPTY_LIGHT_STATE: LightState = {
+            red: 0,
+            green: 0,
+            blue: 0,
+            alpha: 1,
+            isOn: true
+        };
+        const bulbs = group.gatewayInstance.deviceIDs
+            .map((deviceId) => this.bulbsById[deviceId])
+            .filter((bulb): bulb is Bulb => !!bulb)
+            .map((bulb) => this.bulbToDto(bulb))
+            .sort(caseInsensitiveSorter("name"));
+        return {
+            name: group.name,
+            id: group.gatewayInstance.instanceId,
+            bulbs: bulbs,
+            lightState: bulbs[0] ? bulbs[0].lightState : EMPTY_LIGHT_STATE
+        };
+    }
+
+    private bulbToDto(bulb: Bulb): BulbDto {
+        return {
+            id: bulb.gatewayInstance.instanceId,
+            isOnline: bulb.gatewayInstance.alive,
+            lastSeenUnixTimestamp: bulb.gatewayInstance.lastSeen,
+            lightState: bulb.lightState,
+            name: bulb.name
+        };
+    }
 }
 
-async function getGroupsAndAccessories(tradfri: TradfriClient) {
+async function getGroupsAndBulbs(
+    tradfri: TradfriClient
+): Promise<{ groups: Record<number, BulbGroup>; bulbs: Record<number, Bulb> }> {
     try {
         const groupsPromise = new Promise<Group[]>(async (resolve, reject) => {
-            const groupsById: Record<string, Group> = {};
+            const groupsById: Record<number, Group> = {};
             tradfri.on(
                 "group updated",
                 (group) => (groupsById[group.instanceId] = group)
@@ -114,27 +286,73 @@ async function getGroupsAndAccessories(tradfri: TradfriClient) {
             await tradfri.observeGroupsAndScenes();
             resolve(Object.values(groupsById));
         });
-        const accessoriesPromise = new Promise<Accessory[]>(
+        const devicesPromise = new Promise<Accessory[]>(
             async (resolve, reject) => {
-                const accessoriesById: Record<string, Accessory> = {};
+                const devicesById: Record<number, Accessory> = {};
                 tradfri.on(
                     "device updated",
                     (accessory) =>
-                        (accessoriesById[accessory.instanceId] = accessory)
+                        (devicesById[accessory.instanceId] = accessory)
                 );
                 tradfri.on("error", reject);
                 await tradfri.observeDevices();
-                resolve(Object.values(accessoriesById));
+                resolve(Object.values(devicesById));
             }
         );
-        const [groups, accessories] = await Promise.all([
+        const [groups, devices] = await Promise.all([
             groupsPromise,
-            accessoriesPromise
+            devicesPromise
         ]);
 
-        return { groups, accessories };
+        return {
+            groups: groups.reduce((acc, curr) => {
+                acc[curr.instanceId] = {
+                    name: curr.name,
+                    gatewayInstance: curr
+                };
+                return acc;
+            }, {} as Record<number, BulbGroup>),
+            bulbs: devices.reduce((acc, curr) => {
+                acc[curr.instanceId] = {
+                    name: curr.name,
+                    lightState: generateLightState(curr.lightList[0]),
+                    gatewayInstance: curr
+                };
+                return acc;
+            }, {} as Record<number, Bulb>)
+        };
     } catch (error) {
         tradfri.destroy();
         throw error;
     }
+}
+
+function generateLightOperation({
+    red,
+    green,
+    blue,
+    alpha,
+    isOn
+}: LightState): LightOperation {
+    const operation: LightOperation = {
+        transitionTime: 0
+    };
+    operation.onOff = isOn;
+    operation.color = rgbToHex(red, green, blue);
+    operation.dimmer = alpha * 100;
+    return operation;
+}
+
+function generateLightState(light: Light): LightState {
+    const red = parseInt(light.color.substring(0, 2), 16);
+    const green = parseInt(light.color.substring(2, 4), 16);
+    const blue = parseInt(light.color.substring(4, 6), 16);
+    const alpha = light.dimmer / 100;
+    return {
+        red,
+        green,
+        blue,
+        alpha,
+        isOn: light.onOff
+    };
 }

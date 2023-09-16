@@ -123,3 +123,14 @@ export function removeSubstring(input: string, substring: string): string {
     const regex = new RegExp(substring, "gi");
     return input.replace(regex, "").replace(/\(\)/g, "").trim();
 }
+
+export function stringEqualsCi(string1: string, string2: string){
+    return string1.localeCompare(string2, undefined, { sensitivity: "base" }) === 0
+}
+
+export function rgbToHex(red: number, green: number, blue: number) {
+    const redHex = red.toString(16).padStart(2, "0");
+    const greenHex = green.toString(16).padStart(2, "0");
+    const blueHex = blue.toString(16).padStart(2, "0");
+    return redHex + greenHex + blueHex;
+}
